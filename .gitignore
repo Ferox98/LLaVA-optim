@@ -22,7 +22,6 @@ dist
 wandb
 output
 
-checkpoints
 ckpts*
 
 .ipynb_checkpoints
@@ -33,3 +32,6 @@ ckpts*
 
 # Demo
 serve_images/
+
+checkpoints/
+playground/data

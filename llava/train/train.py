@@ -35,7 +35,7 @@ from llava.model import *
 from llava.mm_utils import tokenizer_image_token
 
 from PIL import Image
-
+from llava.train.write_embeddings import write_embeddings
 
 local_rank = None
 
@@ -657,6 +657,7 @@ class LazySupervisedDataset(Dataset):
             length_list.append(cur_len)
         return length_list
 
+    # Modify this function so that it reads Clip's embeddings instead of the image
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
         sources = self.list_data_dict[i]
         if isinstance(i, int):
@@ -706,7 +707,7 @@ class LazySupervisedDataset(Dataset):
             data_dict['images'] = torch.zeros(3, crop_size['height'], crop_size['width'])
         return data_dict
 
-
+# Modify the Data Collator class so that no tokenization is performed on CLIP embeddings
 @dataclass
 class DataCollatorForSupervisedDataset(object):
     """Collate examples for supervised fine-tuning."""
@@ -870,7 +871,13 @@ def train():
             conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
         else:
             conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
-
+    print(f""*50)
+    print("calling make_supervised_data_module")
+    data_module = make_supervised_data_module(tokenizer=tokenizer,
+                                              data_args=data_args)
+    print("writing embeddings")
+    write_embeddings(data_module)
+    # Initialize Vision Encoder
     if model_args.vision_tower is not None:
         model.get_model().initialize_vision_modules(
             model_args=model_args,
@@ -920,8 +927,7 @@ def train():
                     if training_args.bf16 and module.weight.dtype == torch.float32:
                         module = module.to(torch.bfloat16)
 
-    data_module = make_supervised_data_module(tokenizer=tokenizer,
-                                              data_args=data_args)
+    # Define trainer
     trainer = LLaVATrainer(model=model,
                     tokenizer=tokenizer,
                     args=training_args,

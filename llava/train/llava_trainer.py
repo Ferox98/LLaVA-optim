@@ -1,4 +1,5 @@
 import os
+import time
 import torch
 
 from torch.utils.data import Sampler
@@ -257,6 +258,17 @@ class LLaVATrainer(Trainer):
         else:
             super(LLaVATrainer, self)._save_checkpoint(model, trial, metrics)
 
+    def training_step(self, model, inputs) -> torch.Tensor:
+        # record start time
+        start_time = time.time()
+        res = super(LLaVATrainer, self).training_step(model, inputs)
+        end_time = time.time()
+        # calculate iteration throughput
+        throughput = len(inputs) / (end_time - start_time)
+        # log to wandb 
+        self.log({"throughput": throughput})
+        return res 
+    
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
         if getattr(self.args, 'tune_mm_mlp_adapter', False):
             pass
