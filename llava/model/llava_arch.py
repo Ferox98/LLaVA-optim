@@ -91,34 +91,36 @@ class LlavaMetaForCausalLM(ABC):
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
 
-    def encode_images(self, images):
-        image_features = self.get_model().get_vision_tower()(images)
-        image_features = self.get_model().mm_projector(image_features)
+    def encode_images(self, embeddings):
+        # image_features = self.get_model().get_vision_tower()(images)
+        print('**' * 10)
+        print(embeddings.shape)
+        image_features = self.get_model().mm_projector(embeddings)
         return image_features
 
     def prepare_inputs_labels_for_multimodal(
-        self, input_ids, position_ids, attention_mask, past_key_values, labels, images
+        self, input_ids, position_ids, attention_mask, past_key_values, labels, embeddings
     ):
-        vision_tower = self.get_vision_tower()
-        if vision_tower is None or images is None or input_ids.shape[1] == 1:
-            if past_key_values is not None and vision_tower is not None and images is not None and input_ids.shape[1] == 1:
-                target_shape = past_key_values[-1][-1].shape[-2] + 1
-                attention_mask = torch.cat((attention_mask, torch.ones(
-                    (attention_mask.shape[0], target_shape - attention_mask.shape[1]),
-                    dtype=attention_mask.dtype,
-                    device=attention_mask.device
-                )), dim=1)
-                position_ids = torch.sum(attention_mask, dim=1).unsqueeze(-1) - 1
-            return input_ids, position_ids, attention_mask, past_key_values, None, labels
+        # vision_tower = self.get_vision_tower()
+        # if vision_tower is None or embeddings is None or input_ids.shape[1] == 1:
+        #     if past_key_values is not None and vision_tower is not None and embeddings is not None and input_ids.shape[1] == 1:
+        #         target_shape = past_key_values[-1][-1].shape[-2] + 1
+        #         attention_mask = torch.cat((attention_mask, torch.ones(
+        #             (attention_mask.shape[0], target_shape - attention_mask.shape[1]),
+        #             dtype=attention_mask.dtype,
+        #             device=attention_mask.device
+        #         )), dim=1)
+        #         position_ids = torch.sum(attention_mask, dim=1).unsqueeze(-1) - 1
+        #     return input_ids, position_ids, attention_mask, past_key_values, None, labels
 
-        if type(images) is list or images.ndim == 5: 
-            concat_images = torch.cat([image for image in images], dim=0)
-            image_features = self.encode_images(concat_images)
-            split_sizes = [image.shape[0] for image in images]
+        if type(embeddings) is list or embeddings.ndim == 5: 
+            concat_embeddings = torch.cat([embedding for embedding in embeddings], dim=0)
+            image_features = self.encode_images(concat_embeddings)
+            split_sizes = [embedding.shape[0] for embedding in embeddings]
             image_features = torch.split(image_features, split_sizes, dim=0)
             image_features = [x.flatten(0, 1).to(self.device) for x in image_features]
         else:
-            image_features = self.encode_images(images).to(self.device)
+            image_features = self.encode_images(embeddings).to(self.device)
 
         # TODO: image start / end is not implemented here to support pretraining.
         if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
@@ -179,7 +181,7 @@ class LlavaMetaForCausalLM(ABC):
                     cur_image_idx += 1
                     cur_new_input_embeds.append(cur_image_features)
                     cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
-
+                print(f"{i}, {cur_new_input_embeds[i].shape}")
             cur_new_input_embeds = torch.cat(cur_new_input_embeds)
             cur_new_labels = torch.cat(cur_new_labels)
 

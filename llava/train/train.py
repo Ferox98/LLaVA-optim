@@ -23,7 +23,7 @@ import pathlib
 from typing import Dict, Optional, Sequence, List
 
 import torch
-
+import pickle
 import transformers
 
 from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
@@ -36,6 +36,8 @@ from llava.mm_utils import tokenizer_image_token
 
 from PIL import Image
 from llava.train.write_embeddings import write_embeddings
+
+from llava.model.multimodal_projector.builder import build_vision_projector
 
 local_rank = None
 
@@ -65,7 +67,7 @@ class DataArguments:
     data_path: str = field(default=None,
                            metadata={"help": "Path to the training data."})
     lazy_preprocess: bool = False
-    is_multimodal: bool = False
+    is_multimodal: bool = True
     image_folder: Optional[str] = field(default=None)
     image_aspect_ratio: str = 'square'
 
@@ -636,6 +638,7 @@ class LazySupervisedDataset(Dataset):
         self.tokenizer = tokenizer
         self.list_data_dict = list_data_dict
         self.data_args = data_args
+        self.dummy_embeddings = None 
 
     def __len__(self):
         return len(self.list_data_dict)
@@ -664,27 +667,11 @@ class LazySupervisedDataset(Dataset):
             sources = [sources]
         assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
         if 'image' in sources[0]:
-            image_file = self.list_data_dict[i]['image']
-            image_folder = self.data_args.image_folder
-            processor = self.data_args.image_processor
-            image = Image.open(os.path.join(image_folder, image_file)).convert('RGB')
-            if self.data_args.image_aspect_ratio == 'pad':
-                def expand2square(pil_img, background_color):
-                    width, height = pil_img.size
-                    if width == height:
-                        return pil_img
-                    elif width > height:
-                        result = Image.new(pil_img.mode, (width, width), background_color)
-                        result.paste(pil_img, (0, (width - height) // 2))
-                        return result
-                    else:
-                        result = Image.new(pil_img.mode, (height, height), background_color)
-                        result.paste(pil_img, ((height - width) // 2, 0))
-                        return result
-                image = expand2square(image, tuple(int(x*255) for x in processor.image_mean))
-                image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
-            else:
-                image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
+            img_url = self.list_data_dict[i]['image']
+            embeddings_file = f'playground/embeddings/{"".join(img_url.split("/"))[:-4]}.pt'
+            embeddings = torch.load(embeddings_file, map_location='cpu').detach()
+            if self.dummy_embeddings is None:
+                self.dummy_embeddings = embeddings
             sources = preprocess_multimodal(
                 copy.deepcopy([e["conversations"] for e in sources]),
                 self.data_args)
@@ -697,14 +684,11 @@ class LazySupervisedDataset(Dataset):
         if isinstance(i, int):
             data_dict = dict(input_ids=data_dict["input_ids"][0],
                              labels=data_dict["labels"][0])
-
         # image exist in the data
         if 'image' in self.list_data_dict[i]:
-            data_dict['images'] = image
-        elif self.data_args.is_multimodal:
-            # image does not exist in the data, but the model is multimodal
-            crop_size = self.data_args.image_processor.crop_size
-            data_dict['images'] = torch.zeros(3, crop_size['height'], crop_size['width'])
+            data_dict['embeddings'] = embeddings
+        else:
+            data_dict['embeddings'] = self.dummy_embeddings
         return data_dict
 
 # Modify the Data Collator class so that no tokenization is performed on CLIP embeddings
@@ -731,13 +715,13 @@ class DataCollatorForSupervisedDataset(object):
             labels=labels,
             attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
         )
-
-        if 'images' in instances[0]:
-            images = [instance['images'] for instance in instances]
-            if all(x is not None and x.shape == images[0].shape for x in images):
-                batch['images'] = torch.stack(images)
-            else:
-                batch['images'] = images
+        # print(instances)
+        # if 'embeddings' in instances[0]:
+        embeddings = [instance['embeddings'] for instance in instances]
+        if all(x is not None and x.shape == embeddings[0].shape for x in embeddings):
+            batch['embeddings'] = torch.stack(embeddings)
+        else:
+            batch['embeddings'] = embeddings
 
         return batch
 
@@ -781,7 +765,7 @@ def train():
                 bnb_4bit_quant_type=training_args.quant_type # {'fp4', 'nf4'}
             )
         ))
-
+    # What kind of model should I load?
     if model_args.vision_tower is not None:
         if 'mpt' in model_args.model_name_or_path:
             config = transformers.AutoConfig.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
@@ -855,7 +839,7 @@ def train():
             padding_side="right",
             use_fast=False,
         )
-
+    # What kind of tokenizer to use?
     if model_args.version == "v0":
         if tokenizer.pad_token is None:
             smart_tokenizer_and_embedding_resize(
@@ -871,48 +855,68 @@ def train():
             conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
         else:
             conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
-    print(f""*50)
-    print("calling make_supervised_data_module")
+    # Load Dataset
     data_module = make_supervised_data_module(tokenizer=tokenizer,
                                               data_args=data_args)
-    print("writing embeddings")
-    write_embeddings(data_module)
+
+    data_args.is_multimodal = True
+
+    model.config.image_aspect_ratio = data_args.image_aspect_ratio
+    model.config.tokenizer_padding_side = tokenizer.padding_side
+    model.config.tokenizer_model_max_length = tokenizer.model_max_length
+    model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter
+
+    model.config.mm_use_im_start_end = data_args.mm_use_im_start_end = model_args.mm_use_im_start_end
+    model.config.mm_projector_lr = training_args.mm_projector_lr
+    training_args.use_im_start_end = model_args.mm_use_im_start_end
+    model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
+    model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
+
+    model.config.mm_projector_type = getattr(model_args, 'mm_projector_type', 'linear')
+    model.config.mm_hidden_size = 1024
+    # build Vision projector
+    print(f"Hidden size = {model.config.hidden_size}")
+    model.get_model().mm_projector = build_vision_projector(model.config)
+
+    if training_args.bits in [4, 8]:
+        model.get_model().mm_projector.to(dtype=compute_dtype, device=training_args.device)
+
     # Initialize Vision Encoder
-    if model_args.vision_tower is not None:
-        model.get_model().initialize_vision_modules(
-            model_args=model_args,
-            fsdp=training_args.fsdp
-        )
+    # if model_args.vision_tower is not None:
+    #     model.get_model().initialize_vision_modules(
+    #         model_args=model_args,
+    #         fsdp=training_args.fsdp
+    #     )
         
-        vision_tower = model.get_vision_tower()
-        vision_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
+    #     vision_tower = model.get_vision_tower()
+    #     vision_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
 
-        data_args.image_processor = vision_tower.image_processor
-        data_args.is_multimodal = True
+    #     data_args.image_processor = vision_tower.image_processor
+    #     data_args.is_multimodal = True
 
-        model.config.image_aspect_ratio = data_args.image_aspect_ratio
-        model.config.tokenizer_padding_side = tokenizer.padding_side
-        model.config.tokenizer_model_max_length = tokenizer.model_max_length
+    #     model.config.image_aspect_ratio = data_args.image_aspect_ratio
+    #     model.config.tokenizer_padding_side = tokenizer.padding_side
+    #     model.config.tokenizer_model_max_length = tokenizer.model_max_length
 
-        model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter
-        if model_args.tune_mm_mlp_adapter:
-            model.requires_grad_(False)
-            for p in model.get_model().mm_projector.parameters():
-                p.requires_grad = True
+    #     model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter
+    #     if model_args.tune_mm_mlp_adapter:
+    #         model.requires_grad_(False)
+    #         for p in model.get_model().mm_projector.parameters():
+    #             p.requires_grad = True
 
-        model.config.freeze_mm_mlp_adapter = training_args.freeze_mm_mlp_adapter
-        if training_args.freeze_mm_mlp_adapter:
-            for p in model.get_model().mm_projector.parameters():
-                p.requires_grad = False
+    #     model.config.freeze_mm_mlp_adapter = training_args.freeze_mm_mlp_adapter
+    #     if training_args.freeze_mm_mlp_adapter:
+    #         for p in model.get_model().mm_projector.parameters():
+    #             p.requires_grad = False
 
-        if training_args.bits in [4, 8]:
-            model.get_model().mm_projector.to(dtype=compute_dtype, device=training_args.device)
+    #     if training_args.bits in [4, 8]:
+    #         model.get_model().mm_projector.to(dtype=compute_dtype, device=training_args.device)
 
-        model.config.mm_use_im_start_end = data_args.mm_use_im_start_end = model_args.mm_use_im_start_end
-        model.config.mm_projector_lr = training_args.mm_projector_lr
-        training_args.use_im_start_end = model_args.mm_use_im_start_end
-        model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
-        model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
+    #     model.config.mm_use_im_start_end = data_args.mm_use_im_start_end = model_args.mm_use_im_start_end
+    #     model.config.mm_projector_lr = training_args.mm_projector_lr
+    #     training_args.use_im_start_end = model_args.mm_use_im_start_end
+    #     model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
+    #     model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
 
     if training_args.bits in [4, 8]:
         from peft.tuners.lora import LoraLayer
@@ -958,4 +962,5 @@ def train():
 
 
 if __name__ == "__main__":
+    torch.multiprocessing.set_start_method('spawn', force=True)
     train()

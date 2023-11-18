@@ -32,7 +32,7 @@
     "offload_param": {
       "device": "cpu",
       "pin_memory": false,
-      "max_in_cpu": 2e9
+      "max_in_cpu": 3e9
     },
     "overlap_comm": true,
     "contiguous_gradients": true,

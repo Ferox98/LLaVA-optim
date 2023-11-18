@@ -35,3 +35,4 @@ serve_images/
 
 checkpoints/
 playground/data
+playground/embeddings
