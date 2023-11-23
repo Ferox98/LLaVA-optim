@@ -264,7 +264,7 @@ class LLaVATrainer(Trainer):
         res = super(LLaVATrainer, self).training_step(model, inputs)
         end_time = time.time()
         # calculate iteration throughput
-        throughput = len(inputs) / (end_time - start_time)
+        throughput = 4 * len(inputs['labels']) / (end_time - start_time)
         # log to wandb 
         self.log({"throughput": throughput})
         return res 
