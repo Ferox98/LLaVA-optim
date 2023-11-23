@@ -264,11 +264,7 @@ class LLaVATrainer(Trainer):
         res = super(LLaVATrainer, self).training_step(model, inputs)
         end_time = time.time()
         # calculate iteration throughput
-<<<<<<< Updated upstream
         throughput = 4 * len(inputs['labels']) / (end_time - start_time)
-=======
-        throughput = len(inputs['labels']) * 4 / (end_time - start_time)
->>>>>>> Stashed changes
         # log to wandb 
         self.log({"throughput": throughput})
         return res 
