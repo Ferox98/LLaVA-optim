@@ -638,7 +638,8 @@ class LazySupervisedDataset(Dataset):
         self.tokenizer = tokenizer
         self.list_data_dict = list_data_dict
         self.data_args = data_args
-        self.dummy_embeddings = None 
+        self.dummy_embeddings = self.set_dummy_embedding() 
+        
 
     def __len__(self):
         return len(self.list_data_dict)
@@ -660,6 +661,14 @@ class LazySupervisedDataset(Dataset):
             length_list.append(cur_len)
         return length_list
 
+    def set_dummy_embedding(self):
+        for i in range(len(self.list_data_dict)):
+            if 'image' in self.list_data_dict[i]:
+                img_url = self.list_data_dict[i]['image']
+                embeddings_file = f'playground/embeddings/{"".join(img_url.split("/"))[:-4]}.pt'
+                embeddings = torch.load(embeddings_file, map_location='cpu').detach()
+                return embeddings.clone()
+            
     # Modify this function so that it reads Clip's embeddings instead of the image
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
         sources = self.list_data_dict[i]
@@ -670,8 +679,6 @@ class LazySupervisedDataset(Dataset):
             img_url = self.list_data_dict[i]['image']
             embeddings_file = f'playground/embeddings/{"".join(img_url.split("/"))[:-4]}.pt'
             embeddings = torch.load(embeddings_file, map_location='cpu').detach()
-            if self.dummy_embeddings is None:
-                self.dummy_embeddings = embeddings
             sources = preprocess_multimodal(
                 copy.deepcopy([e["conversations"] for e in sources]),
                 self.data_args)
@@ -718,11 +725,8 @@ class DataCollatorForSupervisedDataset(object):
         # print(instances)
         # if 'embeddings' in instances[0]:
         embeddings = [instance['embeddings'] for instance in instances]
-        if all(x is not None and x.shape == embeddings[0].shape for x in embeddings):
-            batch['embeddings'] = torch.stack(embeddings)
-        else:
-            batch['embeddings'] = embeddings
-
+        batch['embeddings'] = torch.stack(embeddings)
+        # print(f'batch embeddings shape: {batch["embeddings"].shape}')
         return batch
 
 

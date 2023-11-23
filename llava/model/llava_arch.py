@@ -93,8 +93,7 @@ class LlavaMetaForCausalLM(ABC):
 
     def encode_images(self, embeddings):
         # image_features = self.get_model().get_vision_tower()(images)
-        print('**' * 10)
-        print(embeddings.shape)
+        embeddings = embeddings.reshape((-1, 577, 1024))
         image_features = self.get_model().mm_projector(embeddings)
         return image_features
 
@@ -151,6 +150,7 @@ class LlavaMetaForCausalLM(ABC):
         cur_image_idx = 0
         for batch_idx, cur_input_ids in enumerate(input_ids):
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
+            # print(f'Num images: {num_images}')
             if num_images == 0:
                 cur_image_features = image_features[cur_image_idx]
                 cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)
@@ -181,7 +181,7 @@ class LlavaMetaForCausalLM(ABC):
                     cur_image_idx += 1
                     cur_new_input_embeds.append(cur_image_features)
                     cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
-                print(f"{i}, {cur_new_input_embeds[i].shape}")
+                # print(f"{i}, {cur_new_input_embeds[i].shape}")
             cur_new_input_embeds = torch.cat(cur_new_input_embeds)
             cur_new_labels = torch.cat(cur_new_labels)
 
